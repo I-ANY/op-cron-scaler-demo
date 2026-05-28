@@ -1,0 +1,9 @@
+apiVersion: op-cron-scale.op-cron-scale.example.com/v1
+kind: CronScaleDemo
+metadata:
+  labels:
+    app.kubernetes.io/name: op-cron-scale
+    app.kubernetes.io/managed-by: kustomize
+  name: cronscaledemo-sample
+spec:
+  # TODO(user): Add fields here
