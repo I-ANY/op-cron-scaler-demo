@@ -29,7 +29,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-const minuteTimeLayout = "2006-01-02 15:04"
+var (
+	logger = log.Log.WithName("controller_cronscaledemo")
+)
 
 // CronScaleDemoReconciler reconciles a CronScaleDemo object
 type CronScaleDemoReconciler struct {
@@ -52,58 +54,77 @@ type CronScaleDemoReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
 func (r *CronScaleDemoReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx).WithValues("namespace", req.Namespace, "name", req.Name)
 	logger.Info("Reconciling CronScaleDemo")
+	logger = logger.WithValues("namespace", req.Namespace, "name", req.Name)
 
+	currentTimeStr := time.Now().Format(opcronscalev1.MinuteTimeLayout)
+	currentTime, _ := time.Parse(opcronscalev1.MinuteTimeLayout, currentTimeStr)
+	// 获取scaler
 	scaler := &opcronscalev1.CronScaleDemo{}
 	if err := r.Get(ctx, req.NamespacedName, scaler); err != nil {
 		logger.Error(err, "unable to fetch CronScale")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-
-	startTime, err := time.ParseInLocation(minuteTimeLayout, scaler.Spec.StartTime, time.Local)
+	// 获取配置的时间段信息
+	startTime, err := time.Parse(opcronscalev1.MinuteTimeLayout, scaler.Spec.StartTime)
 	if err != nil {
 		logger.Error(err, "invalid startTime", "startTime", scaler.Spec.StartTime)
 		return ctrl.Result{}, err
 	}
-
-	endTime, err := time.ParseInLocation(minuteTimeLayout, scaler.Spec.EndTime, time.Local)
+	endTime, err := time.Parse(opcronscalev1.MinuteTimeLayout, scaler.Spec.EndTime)
 	if err != nil {
 		logger.Error(err, "invalid endTime", "endTime", scaler.Spec.EndTime)
 		return ctrl.Result{}, err
 	}
 
-	now := time.Now().Truncate(time.Minute)
+	// 判断当前时间是否在时间段内
 	targetReplicas := scaler.Spec.DefaultReplicas
-	if !now.Before(startTime) && !now.After(endTime) {
+	if !currentTime.Before(startTime) && !currentTime.After(endTime) {
 		targetReplicas = scaler.Spec.Replicas
 	}
-
+	// 更新deployment副本数
 	for _, deployment := range scaler.Spec.Deployments {
-		if err := r.scaleDeployment(ctx, deployment, targetReplicas); err != nil {
+		if err := r.scaleDeployment(ctx, *scaler, deployment, targetReplicas); err != nil {
 			logger.Error(err, "unable to scale Deployment", "deploymentName", deployment.Name, "namespace", deployment.NameSpace)
 			return ctrl.Result{}, err
 		}
 	}
 
+	// 一分钟轮询进行更新
+	//不传 RequeueAfter：不会每分钟检查，那即使时间到了，如果资源没发生变更，也不会自动触发
 	return ctrl.Result{RequeueAfter: time.Minute}, nil
 }
 
-func (r *CronScaleDemoReconciler) scaleDeployment(ctx context.Context, target opcronscalev1.DeploymentScaleTarget, replicas int32) error {
+// 更新deployment副本数方法
+func (r *CronScaleDemoReconciler) scaleDeployment(ctx context.Context, scaler opcronscalev1.CronScaleDemo, target opcronscalev1.DeploymentScaleTarget, replicas int32) error {
 	logger := log.FromContext(ctx).WithValues("deploymentName", target.Name, "namespace", target.NameSpace)
 	deploy := &appsv1.Deployment{}
 
+	// 获取deployment对象
 	if err := r.Get(ctx, types.NamespacedName{Namespace: target.NameSpace, Name: target.Name}, deploy); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-
+	// 如果副本数一样就直接返回
 	if deploy.Spec.Replicas != nil && *deploy.Spec.Replicas == replicas {
 		return nil
 	}
 
+	// 更新deployment副本数
 	logger.Info("updating Deployment replicas", "replicas", replicas)
 	deploy.Spec.Replicas = &replicas
-	return r.Update(ctx, deploy)
+	if err := r.Update(ctx, deploy); err != nil {
+		// 如果更新失败就把scaler 状态更新为 failed
+		scaler.Status.Status = opcronscalev1.FAILED
+		if err := r.Status().Update(ctx, &scaler); err != nil {
+			return err
+		}
+	}
+	//更新成功就把scaler 状态更新为 failed
+	scaler.Status.Status = opcronscalev1.SUCCESS
+	if err := r.Status().Update(ctx, &scaler); err != nil {
+		return err
+	}
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

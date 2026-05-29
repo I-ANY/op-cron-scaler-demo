@@ -20,8 +20,21 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	MinuteTimeLayout = "15:04"
+	SUCCESS          = "Success"
+	FAILED           = "Failed"
+	PENDING          = "Pending"
+)
+
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+
+type DeploymentInfo struct {
+	Replicas  int32  `json:"replicas"`
+	NameSpace string `json:"namespace"`
+	Name      string `json:"name"`
+}
 
 // CronScaleDemoSpec defines the desired state of CronScaleDemo
 type CronScaleDemoSpec struct {
@@ -33,11 +46,18 @@ type CronScaleDemoSpec struct {
 	// foo is an example field of CronScaleDemo. Edit cronscaledemo_types.go to remove/update
 	// +optional
 
-	StartTime       string                  `json:"startTime,omitempty"`
-	EndTime         string                  `json:"endTime,omitempty"`
-	Replicas        int32                   `json:"replicas"`
+	// +kubebuilder:validation:Pattern=`^([01][0-9]|2[0-3]):[0-5][0-9]$`
+	// +kubebuilder:validation:Required
+	StartTime string `json:"startTime"`
+	// +kubebuilder:validation:Pattern=`^([01][0-9]|2[0-3]):[0-5][0-9]$`
+	// +kubebuilder:validation:Required
+	EndTime string `json:"endTime"`
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=10
+	// +kubebuilder:validation:Required
+	Replicas        int32                   `json:"replicas,required"`
 	DefaultReplicas int32                   `json:"defaultReplicas"`
-	Deployments     []DeploymentScaleTarget `json:"deployments"`
+	Deployments     []DeploymentScaleTarget `json:"deployments,required"`
 }
 
 type DeploymentScaleTarget struct {
@@ -66,10 +86,15 @@ type CronScaleDemoStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Status     string             `json:"status"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+
+// 给 status增加一个标记，目的是告诉 controller-tools 在生成 CRD 时，给自定义资源增加一列自定义显示列，这样用 kubectl get 时能直接看到这个字段
+// +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.status"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // CronScaleDemo is the Schema for the cronscaledemoes API
 type CronScaleDemo struct {
