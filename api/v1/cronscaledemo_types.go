@@ -24,7 +24,8 @@ const (
 	MinuteTimeLayout = "15:04"
 	SUCCESS          = "Success"
 	FAILED           = "Failed"
-	PENDING          = "Pending"
+	RUNNING          = "Running"
+	RESTORED         = "Restored"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
