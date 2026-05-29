@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Optimize `CronScaleDemoReconciler.Reconcile` so it uses minute-level time windows, scales deployments through one shared path, and has the RBAC needed to update deployments.
+**Goal:** Optimize `CronScalerReconciler.Reconcile` so it uses minute-level time windows, scales deployments through one shared path, and has the RBAC needed to update deployments.
 
 **Architecture:** Keep the existing string API fields and parse them with a single minute-level layout. `Reconcile` will choose one target replica count based on the parsed time window, then call a helper that fetches and updates each deployment only when needed. The controller will requeue every minute because the desired scheduling precision is minute-level.
 
@@ -13,12 +13,12 @@
 ### Task 1: Add Reconcile Tests for Minute-Level Scaling
 
 **Files:**
-- Modify: `internal/controller/cronscaledemo_controller_test.go`
-- Exercise: `internal/controller/cronscaledemo_controller.go`
+- Modify: `internal/controller/CronScaler_controller_test.go`
+- Exercise: `internal/controller/CronScaler_controller.go`
 
 - [ ] **Step 1: Read the current controller test file**
 
-Open `internal/controller/cronscaledemo_controller_test.go` and keep the existing package/import/style. The file already uses Ginkgo and Gomega.
+Open `internal/controller/CronScaler_controller_test.go` and keep the existing package/import/style. The file already uses Ginkgo and Gomega.
 
 - [ ] **Step 2: Add imports used by the tests**
 
@@ -40,7 +40,7 @@ import (
 
 - [ ] **Step 3: Add the active-window failing test**
 
-Add this `It` block inside the existing `Describe("CronScaleDemo Controller", ...)` block:
+Add this `It` block inside the existing `Describe("CronScaler Controller", ...)` block:
 
 ```go
 It("scales deployments to replicas during the minute-level active window", func(ctx SpecContext) {
@@ -67,12 +67,12 @@ It("scales deployments to replicas during the minute-level active window", func(
     }
     Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
 
-    cronScaleDemo := &opcronscalev1.CronScaleDemo{
+    CronScaler := &opcronscalev1.CronScaler{
         ObjectMeta: metav1.ObjectMeta{
             Name:      name,
             Namespace: namespace,
         },
-        Spec: opcronscalev1.CronScaleDemoSpec{
+        Spec: opcronscalev1.CronScalerSpec{
             StartTime:       currentMinute.Add(-time.Minute).Format(minuteTimeLayout),
             EndTime:         currentMinute.Add(time.Minute).Format(minuteTimeLayout),
             Replicas:        3,
@@ -83,9 +83,9 @@ It("scales deployments to replicas during the minute-level active window", func(
             }},
         },
     }
-    Expect(k8sClient.Create(ctx, cronScaleDemo)).To(Succeed())
+    Expect(k8sClient.Create(ctx, CronScaler)).To(Succeed())
 
-    reconciler := &CronScaleDemoReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+    reconciler := &CronScalerReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
     result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}})
     Expect(err).NotTo(HaveOccurred())
     Expect(result.RequeueAfter).To(Equal(time.Minute))
@@ -110,7 +110,7 @@ corev1 "k8s.io/api/core/v1"
 Run:
 
 ```bash
-go test ./internal/controller -run 'TestControllers/CronScaleDemo_Controller/scales_deployments_to_replicas_during_the_minute-level_active_window'
+go test ./internal/controller -run 'TestControllers/CronScaler_Controller/scales_deployments_to_replicas_during_the_minute-level_active_window'
 ```
 
 Expected: FAIL because `minuteTimeLayout` does not exist yet, or because current `Reconcile` still returns `5 * time.Second`.
@@ -144,12 +144,12 @@ It("scales deployments to defaultReplicas outside the active window", func(ctx S
     }
     Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
 
-    cronScaleDemo := &opcronscalev1.CronScaleDemo{
+    CronScaler := &opcronscalev1.CronScaler{
         ObjectMeta: metav1.ObjectMeta{
             Name:      name,
             Namespace: namespace,
         },
-        Spec: opcronscalev1.CronScaleDemoSpec{
+        Spec: opcronscalev1.CronScalerSpec{
             StartTime:       currentMinute.Add(-3 * time.Minute).Format(minuteTimeLayout),
             EndTime:         currentMinute.Add(-time.Minute).Format(minuteTimeLayout),
             Replicas:        5,
@@ -160,9 +160,9 @@ It("scales deployments to defaultReplicas outside the active window", func(ctx S
             }},
         },
     }
-    Expect(k8sClient.Create(ctx, cronScaleDemo)).To(Succeed())
+    Expect(k8sClient.Create(ctx, CronScaler)).To(Succeed())
 
-    reconciler := &CronScaleDemoReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+    reconciler := &CronScalerReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
     result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}})
     Expect(err).NotTo(HaveOccurred())
     Expect(result.RequeueAfter).To(Equal(time.Minute))
@@ -179,7 +179,7 @@ It("scales deployments to defaultReplicas outside the active window", func(ctx S
 Run:
 
 ```bash
-go test ./internal/controller -run 'TestControllers/CronScaleDemo_Controller/scales_deployments_to_defaultReplicas_outside_the_active_window'
+go test ./internal/controller -run 'TestControllers/CronScaler_Controller/scales_deployments_to_defaultReplicas_outside_the_active_window'
 ```
 
 Expected: FAIL because `minuteTimeLayout` does not exist yet, or because current `Reconcile` still returns `5 * time.Second`.
@@ -189,12 +189,12 @@ Expected: FAIL because `minuteTimeLayout` does not exist yet, or because current
 ### Task 2: Implement Minute-Level Reconcile Logic
 
 **Files:**
-- Modify: `internal/controller/cronscaledemo_controller.go`
-- Test: `internal/controller/cronscaledemo_controller_test.go`
+- Modify: `internal/controller/CronScaler_controller.go`
+- Test: `internal/controller/CronScaler_controller_test.go`
 
 - [ ] **Step 1: Add the minute layout constant**
 
-In `internal/controller/cronscaledemo_controller.go`, after the imports and before `CronScaleDemoReconciler`, add:
+In `internal/controller/CronScaler_controller.go`, after the imports and before `CronScalerReconciler`, add:
 
 ```go
 const minuteTimeLayout = "2006-01-02 15:04"
@@ -205,11 +205,11 @@ const minuteTimeLayout = "2006-01-02 15:04"
 Replace the start of `Reconcile` through the target replica decision with this code:
 
 ```go
-func (r *CronScaleDemoReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
     logger := log.FromContext(ctx).WithValues("namespace", req.Namespace, "name", req.Name)
-    logger.Info("Reconciling CronScaleDemo")
+    logger.Info("Reconciling CronScaler")
 
-    scaler := &opcronscalev1.CronScaleDemo{}
+    scaler := &opcronscalev1.CronScaler{}
     if err := r.Get(ctx, req.NamespacedName, scaler); err != nil {
         logger.Error(err, "unable to fetch CronScale")
         return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -257,7 +257,7 @@ Remove the old `timeNow := ...`, `if startTime <= timeNow...`, both duplicated d
 Below `Reconcile` and above `SetupWithManager`, add:
 
 ```go
-func (r *CronScaleDemoReconciler) scaleDeployment(ctx context.Context, target opcronscalev1.DeploymentScaleTarget, replicas int32) error {
+func (r *CronScalerReconciler) scaleDeployment(ctx context.Context, target opcronscalev1.DeploymentScaleTarget, replicas int32) error {
     logger := log.FromContext(ctx).WithValues("deploymentName", target.Name, "namespace", target.NameSpace)
     deploy := &appsv1.Deployment{}
 
@@ -293,7 +293,7 @@ The helper code uses `appsv1.Deployment`.
 
 - [ ] **Step 6: Add Deployment RBAC marker**
 
-Add this marker under the existing CronScaleDemo RBAC markers:
+Add this marker under the existing CronScaler RBAC markers:
 
 ```go
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
@@ -386,4 +386,4 @@ Expected: `controller-gen` does not panic. On this machine, this may still fail 
 
 **Placeholder scan:** No placeholders remain. Every code-changing step includes concrete code or a precise replacement instruction.
 
-**Type consistency:** The plan consistently uses `DeploymentScaleTarget`, `minuteTimeLayout`, `appsv1.Deployment`, `SpecContext`, and existing `CronScaleDemoSpec` fields.
+**Type consistency:** The plan consistently uses `DeploymentScaleTarget`, `minuteTimeLayout`, `appsv1.Deployment`, `SpecContext`, and existing `CronScalerSpec` fields.

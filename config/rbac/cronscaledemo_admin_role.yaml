@@ -11,17 +11,17 @@ metadata:
   labels:
     app.kubernetes.io/name: op-cron-scale
     app.kubernetes.io/managed-by: kustomize
-  name: cronscaledemo-admin-role
+  name: CronScaler-admin-role
 rules:
 - apiGroups:
   - op-cron-scale.op-cron-scale.example.com
   resources:
-  - cronscaledemoes
+  - cronscalers
   verbs:
   - '*'
 - apiGroups:
   - op-cron-scale.op-cron-scale.example.com
   resources:
-  - cronscaledemoes/status
+  - cronscalers/status
   verbs:
   - get

@@ -36,14 +36,14 @@ type DeploymentInfo struct {
 	Name      string `json:"name"`
 }
 
-// CronScaleDemoSpec defines the desired state of CronScaleDemo
-type CronScaleDemoSpec struct {
+// CronScalerSpec defines the desired state of CronScaler
+type CronScalerSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 
-	// foo is an example field of CronScaleDemo. Edit cronscaledemo_types.go to remove/update
+	// foo is an example field of CronScaler. Edit cronscaler_types.go to remove/update
 	// +optional
 
 	// +kubebuilder:validation:Pattern=`^([01][0-9]|2[0-3]):[0-5][0-9]$`
@@ -55,9 +55,10 @@ type CronScaleDemoSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=10
 	// +kubebuilder:validation:Required
-	Replicas        int32                   `json:"replicas,required"`
-	DefaultReplicas int32                   `json:"defaultReplicas"`
-	Deployments     []DeploymentScaleTarget `json:"deployments,required"`
+	Replicas int32 `json:"replicas"`
+	// +optional
+	DefaultReplicas int32                   `json:"defaultReplicas,omitempty"`
+	Deployments     []DeploymentScaleTarget `json:"deployments"`
 }
 
 type DeploymentScaleTarget struct {
@@ -65,15 +66,15 @@ type DeploymentScaleTarget struct {
 	NameSpace string `json:"namespace"`
 }
 
-// CronScaleDemoStatus defines the observed state of CronScaleDemo.
-type CronScaleDemoStatus struct {
+// CronScalerStatus defines the observed state of CronScaler.
+type CronScalerStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
 	// For Kubernetes API conventions, see:
 	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
 
-	// conditions represent the current state of the CronScaleDemo resource.
+	// conditions represent the current state of the CronScaler resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
 	// Standard condition types include:
@@ -91,37 +92,36 @@ type CronScaleDemoStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-
-// 给 status增加一个标记，目的是告诉 controller-tools 在生成 CRD 时，给自定义资源增加一列自定义显示列，这样用 kubectl get 时能直接看到这个字段
+// +kubebuilder:resource:path=cronscalers,singular=cronscaler
 // +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
-// CronScaleDemo is the Schema for the cronscaledemoes API
-type CronScaleDemo struct {
+// CronScaler is the Schema for the cronscalers API
+type CronScaler struct {
 	metav1.TypeMeta `json:",inline"`
 
 	// metadata is a standard object metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of CronScaleDemo
+	// spec defines the desired state of CronScaler
 	// +required
-	Spec CronScaleDemoSpec `json:"spec"`
+	Spec CronScalerSpec `json:"spec"`
 
-	// status defines the observed state of CronScaleDemo
+	// status defines the observed state of CronScaler
 	// +optional
-	Status CronScaleDemoStatus `json:"status,omitzero"`
+	Status CronScalerStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// CronScaleDemoList contains a list of CronScaleDemo
-type CronScaleDemoList struct {
+// CronScalerList contains a list of CronScaler
+type CronScalerList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`
-	Items           []CronScaleDemo `json:"items"`
+	Items           []CronScaler `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&CronScaleDemo{}, &CronScaleDemoList{})
+	SchemeBuilder.Register(&CronScaler{}, &CronScalerList{})
 }

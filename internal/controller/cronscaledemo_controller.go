@@ -30,41 +30,42 @@ import (
 )
 
 var (
-	logger = log.Log.WithName("controller_cronscaledemo")
+	logger = log.Log.WithName("controller_CronScaler")
 )
 
-// CronScaleDemoReconciler reconciles a CronScaleDemo object
-type CronScaleDemoReconciler struct {
+// CronScalerReconciler reconciles a CronScaler object
+type CronScalerReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=op-cron-scale.op-cron-scale.example.com,resources=cronscaledemoes,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=op-cron-scale.op-cron-scale.example.com,resources=cronscaledemoes/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=op-cron-scale.op-cron-scale.example.com,resources=cronscaledemoes/finalizers,verbs=update
+// +kubebuilder:rbac:groups=op-cron-scale.op-cron-scale.example.com,resources=cronscalers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=op-cron-scale.op-cron-scale.example.com,resources=cronscalers/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=op-cron-scale.op-cron-scale.example.com,resources=cronscalers/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
-// the CronScaleDemo object against the actual cluster state, and then
+// the CronScaler object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
-func (r *CronScaleDemoReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger.Info("Reconciling CronScaleDemo")
-	logger = logger.WithValues("namespace", req.Namespace, "name", req.Name)
+func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).WithValues("namespace", req.Namespace, "name", req.Name)
+	logger.Info("Reconciling CronScaler")
 
 	currentTimeStr := time.Now().Format(opcronscalev1.MinuteTimeLayout)
 	currentTime, _ := time.Parse(opcronscalev1.MinuteTimeLayout, currentTimeStr)
 	// 获取scaler
-	scaler := &opcronscalev1.CronScaleDemo{}
+	scaler := &opcronscalev1.CronScaler{}
 	if err := r.Get(ctx, req.NamespacedName, scaler); err != nil {
 		logger.Error(err, "unable to fetch CronScale")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+
 	// 获取配置的时间段信息
 	startTime, err := time.Parse(opcronscalev1.MinuteTimeLayout, scaler.Spec.StartTime)
 	if err != nil {
@@ -76,27 +77,28 @@ func (r *CronScaleDemoReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		logger.Error(err, "invalid endTime", "endTime", scaler.Spec.EndTime)
 		return ctrl.Result{}, err
 	}
-
+	logger.Info("current time", "currentTime", currentTime.Format(opcronscalev1.MinuteTimeLayout), "startTime", startTime.Format(opcronscalev1.MinuteTimeLayout), "endTime", endTime.Format(opcronscalev1.MinuteTimeLayout))
 	// 判断当前时间是否在时间段内
 	targetReplicas := scaler.Spec.DefaultReplicas
-	if !currentTime.Before(startTime) && !currentTime.After(endTime) {
+	if currentTime.After(startTime) && currentTime.Before(endTime) {
+		logger.Info("start to scale deployment", "targetReplicas", scaler.Spec.Replicas)
 		targetReplicas = scaler.Spec.Replicas
-	}
-	// 更新deployment副本数
-	for _, deployment := range scaler.Spec.Deployments {
-		if err := r.scaleDeployment(ctx, *scaler, deployment, targetReplicas); err != nil {
-			logger.Error(err, "unable to scale Deployment", "deploymentName", deployment.Name, "namespace", deployment.NameSpace)
-			return ctrl.Result{}, err
+		// 更新deployment副本数
+		for _, deployment := range scaler.Spec.Deployments {
+			if err := r.scaleDeployment(ctx, *scaler, deployment, targetReplicas); err != nil {
+				logger.Error(err, "unable to scale Deployment", "deploymentName", deployment.Name, "namespace", deployment.NameSpace)
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
 	// 一分钟轮询进行更新
 	//不传 RequeueAfter：不会每分钟检查，那即使时间到了，如果资源没发生变更，也不会自动触发
-	return ctrl.Result{RequeueAfter: time.Minute}, nil
+	return ctrl.Result{RequeueAfter: time.Second * 5}, nil
 }
 
 // 更新deployment副本数方法
-func (r *CronScaleDemoReconciler) scaleDeployment(ctx context.Context, scaler opcronscalev1.CronScaleDemo, target opcronscalev1.DeploymentScaleTarget, replicas int32) error {
+func (r *CronScalerReconciler) scaleDeployment(ctx context.Context, scaler opcronscalev1.CronScaler, target opcronscalev1.DeploymentScaleTarget, replicas int32) error {
 	logger := log.FromContext(ctx).WithValues("deploymentName", target.Name, "namespace", target.NameSpace)
 	deploy := &appsv1.Deployment{}
 
@@ -128,9 +130,9 @@ func (r *CronScaleDemoReconciler) scaleDeployment(ctx context.Context, scaler op
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *CronScaleDemoReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *CronScalerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&opcronscalev1.CronScaleDemo{}).
-		Named("cronscaledemo").
+		For(&opcronscalev1.CronScaler{}).
+		Named("CronScaler").
 		Complete(r)
 }

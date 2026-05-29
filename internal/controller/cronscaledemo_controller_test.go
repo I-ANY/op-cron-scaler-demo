@@ -43,7 +43,7 @@ func TestControllers(t *testing.T) {
 	RunSpecs(t, "Controller Suite")
 }
 
-var _ = Describe("CronScaleDemo Controller", func() {
+var _ = Describe("CronScaler Controller", func() {
 	It("scales deployments to replicas during the minute-level active window", func(ctx SpecContext) {
 		name := fmt.Sprintf("active-%d", time.Now().UnixNano())
 		namespace := "default"
@@ -69,12 +69,12 @@ var _ = Describe("CronScaleDemo Controller", func() {
 		}
 		Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
 
-		cronScaleDemo := &opcronscalev1.CronScaleDemo{
+		CronScaler := &opcronscalev1.CronScaler{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
 				Namespace: namespace,
 			},
-			Spec: opcronscalev1.CronScaleDemoSpec{
+			Spec: opcronscalev1.CronScalerSpec{
 				StartTime:       currentMinute.Add(-time.Minute).Format(testMinuteTimeLayout),
 				EndTime:         currentMinute.Add(time.Minute).Format(testMinuteTimeLayout),
 				Replicas:        3,
@@ -85,9 +85,9 @@ var _ = Describe("CronScaleDemo Controller", func() {
 				}},
 			},
 		}
-		Expect(k8sClient.Create(ctx, cronScaleDemo)).To(Succeed())
+		Expect(k8sClient.Create(ctx, CronScaler)).To(Succeed())
 
-		reconciler := &CronScaleDemoReconciler{Client: k8sClient, Scheme: scheme}
+		reconciler := &CronScalerReconciler{Client: k8sClient, Scheme: scheme}
 		result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).To(Equal(time.Minute))
@@ -123,12 +123,12 @@ var _ = Describe("CronScaleDemo Controller", func() {
 		}
 		Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
 
-		cronScaleDemo := &opcronscalev1.CronScaleDemo{
+		CronScaler := &opcronscalev1.CronScaler{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
 				Namespace: namespace,
 			},
-			Spec: opcronscalev1.CronScaleDemoSpec{
+			Spec: opcronscalev1.CronScalerSpec{
 				StartTime:       currentMinute.Add(-3 * time.Minute).Format(testMinuteTimeLayout),
 				EndTime:         currentMinute.Add(-time.Minute).Format(testMinuteTimeLayout),
 				Replicas:        5,
@@ -139,9 +139,9 @@ var _ = Describe("CronScaleDemo Controller", func() {
 				}},
 			},
 		}
-		Expect(k8sClient.Create(ctx, cronScaleDemo)).To(Succeed())
+		Expect(k8sClient.Create(ctx, CronScaler)).To(Succeed())
 
-		reconciler := &CronScaleDemoReconciler{Client: k8sClient, Scheme: scheme}
+		reconciler := &CronScalerReconciler{Client: k8sClient, Scheme: scheme}
 		result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).To(Equal(time.Minute))

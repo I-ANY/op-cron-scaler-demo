@@ -15,7 +15,7 @@ resources:
   controller: true
   domain: op-cron-scale.example.com
   group: op-cron-scale
-  kind: CronScaleDemo
+  kind: CronScaler
   path: github.com/example/op-cron-scale/api/v1
   version: v1
 version: "3"

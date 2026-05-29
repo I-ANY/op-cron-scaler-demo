@@ -1,9 +1,20 @@
 apiVersion: op-cron-scale.op-cron-scale.example.com/v1
-kind: CronScaleDemo
+kind: CronScaler
 metadata:
   labels:
     app.kubernetes.io/name: op-cron-scale
     app.kubernetes.io/managed-by: kustomize
-  name: cronscaledemo-sample
+  name: cronscaler-sample
+  namespace: app
 spec:
+  startTime: "17:20"
+  endTime: "18:00"
+  replicas: 5
+  defaultReplicas: 1
+  deployments:
+  - name: nginx-1
+    namespace: app
+  - name: nginx-2
+    namespace: app
+
   # TODO(user): Add fields here

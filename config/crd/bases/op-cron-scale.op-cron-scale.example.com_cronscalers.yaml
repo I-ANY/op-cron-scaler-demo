@@ -4,20 +4,27 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
-  name: cronscaledemoes.op-cron-scale.op-cron-scale.example.com
+  name: cronscalers.op-cron-scale.op-cron-scale.example.com
 spec:
   group: op-cron-scale.op-cron-scale.example.com
   names:
-    kind: CronScaleDemo
-    listKind: CronScaleDemoList
-    plural: cronscaledemoes
-    singular: cronscaledemo
+    kind: CronScaler
+    listKind: CronScalerList
+    plural: cronscalers
+    singular: cronscaler
   scope: Namespaced
   versions:
-  - name: v1
+  - additionalPrinterColumns:
+    - jsonPath: .status.status
+      name: Status
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
     schema:
       openAPIV3Schema:
-        description: CronScaleDemo is the Schema for the cronscaledemoes API
+        description: CronScaler is the Schema for the cronscalers API
         properties:
           apiVersion:
             description: |-
@@ -37,7 +44,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of CronScaleDemo
+            description: spec defines the desired state of CronScaler
             properties:
               defaultReplicas:
                 format: int32
@@ -55,23 +62,29 @@ spec:
                   type: object
                 type: array
               endTime:
+                pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
                 type: string
               replicas:
                 format: int32
+                maximum: 10
+                minimum: 0
                 type: integer
               startTime:
+                pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
                 type: string
             required:
             - defaultReplicas
             - deployments
+            - endTime
             - replicas
+            - startTime
             type: object
           status:
-            description: status defines the observed state of CronScaleDemo
+            description: status defines the observed state of CronScaler
             properties:
               conditions:
                 description: |-
-                  conditions represent the current state of the CronScaleDemo resource.
+                  conditions represent the current state of the CronScaler resource.
                   Each condition has a unique type and reflects the status of a specific aspect of the resource.
 
                   Standard condition types include:
@@ -138,11 +151,14 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              status:
+                type: string
+            required:
+            - status
             type: object
         required:
         - spec
         type: object
     served: true
     storage: true
-    subresources:
-      status: {}
+    subresources: {}

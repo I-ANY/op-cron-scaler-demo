@@ -2,7 +2,7 @@
 # since it depends on service name and namespace that are out of this kustomize package.
 # It should be run by config/default
 resources:
-- bases/op-cron-scale.op-cron-scale.example.com_cronscaledemoes.yaml
+- bases/op-cron-scale.op-cron-scale.example.com_cronscalers.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

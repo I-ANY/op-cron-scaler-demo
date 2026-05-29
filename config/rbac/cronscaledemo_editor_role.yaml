@@ -11,12 +11,12 @@ metadata:
   labels:
     app.kubernetes.io/name: op-cron-scale
     app.kubernetes.io/managed-by: kustomize
-  name: cronscaledemo-editor-role
+  name: CronScaler-editor-role
 rules:
 - apiGroups:
   - op-cron-scale.op-cron-scale.example.com
   resources:
-  - cronscaledemoes
+  - cronscalers
   verbs:
   - create
   - delete
@@ -28,6 +28,6 @@ rules:
 - apiGroups:
   - op-cron-scale.op-cron-scale.example.com
   resources:
-  - cronscaledemoes/status
+  - cronscalers/status
   verbs:
   - get
