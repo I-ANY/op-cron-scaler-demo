@@ -36,6 +36,20 @@ import (
 
 const FinalizerName = "finalizer.op-cron-scaler.example.com"
 
+const (
+	deploymentInfoReasonGetFailed      = "GetDeploymentFailed"
+	deploymentInfoReasonNotFound       = "DeploymentNotFound"
+	deploymentInfoReasonReplicasNotSet = "DeploymentReplicasNotSet"
+)
+
+type deploymentInfoAnnotation struct {
+	Replicas  *int32 `json:"replicas,omitempty"`
+	NameSpace string `json:"namespace"`
+	Name      string `json:"name"`
+	Reason    string `json:"reason,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
 // CronScalerReconciler reconciles a CronScaler object
 type CronScalerReconciler struct {
 	client.Client
@@ -109,9 +123,10 @@ func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			// status 更新后重新入队，避免继续使用旧 resourceVersion 更新 annotations
 			return ctrl.Result{RequeueAfter: time.Millisecond}, nil
 		}
-		if scaler.Status.Status == cronscalerv1.RUNNING && !hasSavedDeploymentInfo(*scaler) {
-			// 保存deployment 的信息
-			if err := saveDeploymentInfoIntoAnnotation(ctx, *scaler, r); err != nil {
+		// 只在初始化阶段补齐缺失记录，避免把已经扩缩容后的副本数误存成原始值。
+		if scaler.Status.Status == cronscalerv1.RUNNING && needsDeploymentInfoRefresh(*scaler, true) {
+			saved, err := saveDeploymentInfoIntoAnnotation(ctx, *scaler, r, true)
+			if err != nil {
 				// 并发删除时对象已不存在，不需要再保存初始化信息。
 				if apierrors.IsNotFound(err) {
 					return ctrl.Result{}, nil
@@ -119,8 +134,24 @@ func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				reconcileLogger.Error(err, "Unable to save original Deployment info into annotation")
 				return ctrl.Result{}, err
 			}
-			// annotations 更新后重新入队，避免继续使用旧 resourceVersion 更新 status
-			return ctrl.Result{RequeueAfter: time.Millisecond}, nil
+			if saved {
+				// annotations 更新后重新入队，避免继续使用旧 resourceVersion 更新 status。
+				return ctrl.Result{RequeueAfter: time.Millisecond}, nil
+			}
+		}
+		if scaler.Status.Status != cronscalerv1.RUNNING && needsDeploymentInfoRefresh(*scaler, false) {
+			// 已经记录失败原因的 Deployment 后续可能被创建出来，需要重试并用真实副本数替换失败记录。
+			saved, err := saveDeploymentInfoIntoAnnotation(ctx, *scaler, r, false)
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					return ctrl.Result{}, nil
+				}
+				reconcileLogger.Error(err, "Unable to refresh original Deployment info annotation")
+				return ctrl.Result{}, err
+			}
+			if saved {
+				return ctrl.Result{RequeueAfter: time.Millisecond}, nil
+			}
 		}
 
 		// 开始进行 scale
@@ -142,6 +173,10 @@ func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			// 更新deployment副本数，并记录本轮扩缩容失败的 deployment
 			failedDeployments := make([]cronscalerv1.DeploymentScaleFailedStatus, 0)
 			for _, deployment := range scaler.Spec.Deployments {
+				if failedDeployment := deploymentInfoUnavailableStatus(*scaler, deployment); failedDeployment != nil {
+					failedDeployments = append(failedDeployments, *failedDeployment)
+					continue
+				}
 				if err := r.scaleDeployment(ctx, deployment, scaler.Spec.Replicas); err != nil {
 					reconcileLogger.Error(err, "Unable to scale Deployment", "deploymentName", deployment.Name, "deploymentNamespace", deployment.NameSpace)
 					failedDeployments = append(failedDeployments, cronscalerv1.DeploymentScaleFailedStatus{
@@ -157,7 +192,7 @@ func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				reconcileLogger.Error(err, "Unable to update CronScaler scale status")
 				return ctrl.Result{}, err
 			}
-		} else if scaler.Status.Status == cronscalerv1.SUCCESS {
+		} else if shouldRestoreDeployments(scaler.Status.Status) {
 			// 不在时间范围内时，如果已经扩缩容过，需要恢复 deployment 原始副本数
 			if err := restoreDeploymentReplicas(ctx, r, *scaler); err != nil {
 				reconcileLogger.Error(err, "Unable to restore Deployment replicas")
@@ -168,7 +203,7 @@ func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// cron scaler 被删除了
 		// 如果已经更改了 deployment 的副本数，那么需要把副本数还原
 		reconcileLogger.Info("Deleting CronScaler")
-		if scaler.Status.Status == cronscalerv1.SUCCESS {
+		if shouldRestoreDeployments(scaler.Status.Status) {
 			if err := restoreDeploymentReplicas(ctx, r, *scaler); err != nil {
 				reconcileLogger.Error(err, "Unable to restore Deployment replicas")
 				return ctrl.Result{}, err
@@ -203,44 +238,159 @@ func isWithinScaleWindow(currentTime, startTime, endTime time.Time) bool {
 	return !currentTime.Before(startTime) || currentTime.Before(endTime)
 }
 
-func hasSavedDeploymentInfo(scaler cronscalerv1.CronScaler) bool {
+func needsDeploymentInfoRefresh(scaler cronscalerv1.CronScaler, includeMissing bool) bool {
+	// 不能只判断 annotations 是否为空，kubectl apply 会写入自己的 last-applied annotation。
 	for _, deployment := range scaler.Spec.Deployments {
-		if _, ok := scaler.Annotations[deployment.Name]; !ok {
-			return false
+		info, ok := readDeploymentInfoAnnotation(scaler, deployment)
+		if !ok {
+			if includeMissing {
+				return true
+			}
+			continue
+		}
+		if info.Replicas == nil {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
-// 保存目标 deployment的信息
-func saveDeploymentInfoIntoAnnotation(ctx context.Context, scaler cronscalerv1.CronScaler, r *CronScalerReconciler) (err error) {
+func shouldRestoreDeployments(status string) bool {
+	// Failed 也可能代表部分 Deployment 已经扩缩容成功，需要在窗口结束或删除时恢复。
+	return status == cronscalerv1.SUCCESS || status == cronscalerv1.FAILED
+}
+
+// 保存目标 Deployment 的原始副本数；返回值表示本轮是否写入了新的 annotation。
+func saveDeploymentInfoIntoAnnotation(ctx context.Context, scaler cronscalerv1.CronScaler, r *CronScalerReconciler, includeMissing bool) (bool, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Saving original Deployment info into annotation")
 	// 如果用户创建 CronScaler 时没有配置 annotations，这里需要先初始化再写入
 	if scaler.Annotations == nil {
 		scaler.Annotations = make(map[string]string)
 	}
+	saved := false
 	deployment := appsv1.Deployment{}
 	for _, depItem := range scaler.Spec.Deployments {
+		currentInfo, ok := readDeploymentInfoAnnotation(scaler, depItem)
+		if !ok && !includeMissing {
+			continue
+		}
+		// 已成功保存过的 Deployment 不再覆盖，避免后续 reconcile 改写原始副本数。
+		if ok && currentInfo.Replicas != nil {
+			continue
+		}
 		if err := r.Get(ctx, types.NamespacedName{
 			Name:      depItem.Name,
 			Namespace: depItem.NameSpace,
 		}, &deployment); err != nil {
+			if apierrors.IsNotFound(err) {
+				// 缺失的 Deployment 不阻塞其它 Deployment 初始化，但要记录原因供后续排查。
+				wrote, err := saveDeploymentInfoAnnotationFailure(scaler.Annotations, depItem, deploymentInfoReasonNotFound, err.Error())
+				if err != nil {
+					return false, err
+				}
+				saved = saved || wrote
+				logger.Info("Deployment not found while saving original info", "deploymentName", depItem.Name, "deploymentNamespace", depItem.NameSpace)
+				continue
+			}
+			// 非 NotFound 的读取失败也写入 annotation，避免下一轮只能看到反复报错。
+			wrote, err := saveDeploymentInfoAnnotationFailure(scaler.Annotations, depItem, deploymentInfoReasonGetFailed, err.Error())
+			if err != nil {
+				return false, err
+			}
+			saved = saved || wrote
 			logger.Error(err, "Unable to get Deployment", "deploymentName", depItem.Name, "deploymentNamespace", depItem.NameSpace)
 			continue
 		}
-		originalDeploy := cronscalerv1.DeploymentInfo{
-			Name:      deployment.Name,
+		if deployment.Spec.Replicas == nil {
+			// 没有显式副本数时无法可靠恢复，所以记录失败原因而不是写入错误的默认值。
+			wrote, err := saveDeploymentInfoAnnotationFailure(scaler.Annotations, depItem, deploymentInfoReasonReplicasNotSet, "Deployment spec.replicas is nil")
+			if err != nil {
+				return false, err
+			}
+			saved = saved || wrote
+			logger.Info("Deployment replicas not set while saving original info", "deploymentName", depItem.Name, "deploymentNamespace", depItem.NameSpace)
+			continue
+		}
+		originalDeploy := deploymentInfoAnnotation{
+			Replicas:  deployment.Spec.Replicas,
 			NameSpace: deployment.Namespace,
-			Replicas:  *deployment.Spec.Replicas,
+			Name:      deployment.Name,
 		}
 		jsonData, err := json.Marshal(originalDeploy)
 		if err != nil {
-			return err
+			return false, err
 		}
-		scaler.Annotations[depItem.Name] = string(jsonData)
+		newAnnotation := string(jsonData)
+		if scaler.Annotations[depItem.Name] != newAnnotation {
+			scaler.Annotations[depItem.Name] = newAnnotation
+			saved = true
+		}
 	}
-	return r.Update(ctx, &scaler)
+	if !saved {
+		// 没有新增 annotation 时不执行 Update，避免无意义写入触发循环。
+		return false, nil
+	}
+	return true, r.Update(ctx, &scaler)
+}
+
+func saveDeploymentInfoAnnotationFailure(annotations map[string]string, deployment cronscalerv1.DeploymentScaleTarget, reason, message string) (bool, error) {
+	// 失败记录和成功记录放在同一个 annotation key，后续 reconcile 可以直接知道该 Deployment 为什么没有原始副本数。
+	failedInfo := deploymentInfoAnnotation{
+		NameSpace: deployment.NameSpace,
+		Name:      deployment.Name,
+		Reason:    reason,
+		Message:   message,
+	}
+	jsonData, err := json.Marshal(failedInfo)
+	if err != nil {
+		return false, err
+	}
+	newAnnotation := string(jsonData)
+	if annotations[deployment.Name] == newAnnotation {
+		return false, nil
+	}
+	annotations[deployment.Name] = newAnnotation
+	return true, nil
+}
+
+func readDeploymentInfoAnnotation(scaler cronscalerv1.CronScaler, deployment cronscalerv1.DeploymentScaleTarget) (deploymentInfoAnnotation, bool) {
+	jsonData, ok := scaler.Annotations[deployment.Name]
+	if !ok {
+		return deploymentInfoAnnotation{}, false
+	}
+	var info deploymentInfoAnnotation
+	if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
+		// annotation 被人工改坏时当作需要刷新，下一轮会重新写入可读的原因或副本数。
+		return deploymentInfoAnnotation{
+			Name:      deployment.Name,
+			NameSpace: deployment.NameSpace,
+			Reason:    deploymentInfoReasonGetFailed,
+			Message:   err.Error(),
+		}, true
+	}
+	return info, true
+}
+
+func deploymentInfoUnavailableStatus(scaler cronscalerv1.CronScaler, deployment cronscalerv1.DeploymentScaleTarget) *cronscalerv1.DeploymentScaleFailedStatus {
+	info, ok := readDeploymentInfoAnnotation(scaler, deployment)
+	if ok && info.Replicas != nil {
+		return nil
+	}
+	reason := "OriginalDeploymentInfoUnavailable"
+	message := "Original Deployment replicas were not saved"
+	if ok && info.Reason != "" {
+		reason = info.Reason
+		message = info.Message
+	}
+	// 没有原始副本数的 Deployment 不参与扩缩容，避免后续无法可靠恢复。
+	return &cronscalerv1.DeploymentScaleFailedStatus{
+		Name:               deployment.Name,
+		NameSpace:          deployment.NameSpace,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: metav1.Now(),
+	}
 }
 
 // 更新deployment副本数方法
@@ -250,7 +400,8 @@ func (r *CronScalerReconciler) scaleDeployment(ctx context.Context, target crons
 
 	// 获取deployment对象
 	if err := r.Get(ctx, types.NamespacedName{Namespace: target.NameSpace, Name: target.Name}, deploy); err != nil {
-		return client.IgnoreNotFound(err)
+		// 扩缩容阶段不能忽略 NotFound，要让 status 记录具体失败的 Deployment。
+		return err
 	}
 	// 如果副本数一样就直接返回
 	if deploy.Spec.Replicas != nil && *deploy.Spec.Replicas == replicas {
@@ -303,9 +454,14 @@ func restoreDeploymentReplicas(ctx context.Context, r *CronScalerReconciler, sca
 			logger.Info("Original Deployment info not found in annotation", "deploymentName", depItem.Name, "deploymentNamespace", depItem.NameSpace)
 			continue
 		}
-		var originalDeploy cronscalerv1.DeploymentInfo
+		var originalDeploy deploymentInfoAnnotation
 		if err := json.Unmarshal([]byte(jsonData), &originalDeploy); err != nil {
 			logger.Error(err, "Unable to unmarshal original Deployment info from annotation", "deploymentName", depItem.Name, "deploymentNamespace", depItem.NameSpace)
+			continue
+		}
+		if originalDeploy.Replicas == nil {
+			// 只有失败原因、没有 replicas 的记录不能用于恢复，避免把缺失信息误恢复成 0。
+			logger.Info("Original Deployment replicas unavailable", "deploymentName", originalDeploy.Name, "deploymentNamespace", originalDeploy.NameSpace, "reason", originalDeploy.Reason, "message", originalDeploy.Message)
 			continue
 		}
 		deployment := appsv1.Deployment{}
@@ -316,8 +472,9 @@ func restoreDeploymentReplicas(ctx context.Context, r *CronScalerReconciler, sca
 			logger.Error(err, "Unable to get Deployment", "deploymentName", originalDeploy.Name, "deploymentNamespace", originalDeploy.NameSpace)
 			continue
 		}
-		if *deployment.Spec.Replicas != originalDeploy.Replicas {
-			deployment.Spec.Replicas = &originalDeploy.Replicas
+		if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != *originalDeploy.Replicas {
+			// replicas 为空时也显式写回原始值，保证恢复后的 spec 可预期。
+			deployment.Spec.Replicas = originalDeploy.Replicas
 			if err := r.Update(ctx, &deployment); err != nil {
 				logger.Error(err, "Unable to update Deployment", "deploymentName", originalDeploy.Name, "deploymentNamespace", originalDeploy.NameSpace)
 				continue

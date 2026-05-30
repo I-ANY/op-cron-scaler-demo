@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,8 +38,10 @@ func TestSaveDeploymentInfoIntoAnnotationInitializesAnnotationsAndStoresNamespac
 		Scheme: scheme,
 	}
 
-	if err := saveDeploymentInfoIntoAnnotation(context.Background(), scaler, reconciler); err != nil {
+	if saved, err := saveDeploymentInfoIntoAnnotation(context.Background(), scaler, reconciler, true); err != nil {
 		t.Fatalf("saveDeploymentInfoIntoAnnotation returned error: %v", err)
+	} else if !saved {
+		t.Fatalf("saveDeploymentInfoIntoAnnotation saved = false, want true")
 	}
 
 	var updated cronscalerv1.CronScaler
@@ -300,6 +303,147 @@ func TestReconcileRecordsFailedDeploymentsAndContinuesScaling(t *testing.T) {
 	}
 	if updatedAPI.Spec.Replicas == nil || *updatedAPI.Spec.Replicas != targetReplicas {
 		t.Fatalf("api replicas = %v, want %d", updatedAPI.Spec.Replicas, targetReplicas)
+	}
+}
+
+func TestReconcileMissingDeploymentDoesNotBlockExistingDeploymentScaling(t *testing.T) {
+	scheme := newTestScheme(t)
+	initialReplicas := int32(1)
+	targetReplicas := int32(5)
+	scaler := cronscalerv1.CronScaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "sample",
+			Namespace:  "default",
+			Finalizers: []string{FinalizerName},
+		},
+		Spec: cronscalerv1.CronScalerSpec{
+			StartTime: "00:00",
+			EndTime:   "00:00",
+			Replicas:  targetReplicas,
+			Deployments: []cronscalerv1.DeploymentScaleTarget{
+				{Name: "web", NameSpace: "apps"},
+				{Name: "missing", NameSpace: "apps"},
+			},
+		},
+		Status: cronscalerv1.CronScalerStatus{Status: cronscalerv1.RUNNING},
+	}
+	webDeployment := appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "apps"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &initialReplicas},
+	}
+	reconciler := &CronScalerReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&cronscalerv1.CronScaler{}).WithObjects(&scaler, &webDeployment).Build(),
+		Scheme: scheme,
+	}
+
+	for i := 0; i < 2; i++ {
+		_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "sample", Namespace: "default"}})
+		if err != nil {
+			t.Fatalf("Reconcile attempt %d returned error: %v", i+1, err)
+		}
+	}
+
+	var updatedWeb appsv1.Deployment
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: "web", Namespace: "apps"}, &updatedWeb); err != nil {
+		t.Fatalf("get updated web Deployment returned error: %v", err)
+	}
+	if updatedWeb.Spec.Replicas == nil || *updatedWeb.Spec.Replicas != targetReplicas {
+		t.Fatalf("web replicas = %v, want %d", updatedWeb.Spec.Replicas, targetReplicas)
+	}
+
+	var updatedScaler cronscalerv1.CronScaler
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: "sample", Namespace: "default"}, &updatedScaler); err != nil {
+		t.Fatalf("get updated CronScaler returned error: %v", err)
+	}
+	if updatedScaler.Status.Status != cronscalerv1.FAILED {
+		t.Fatalf("status = %s, want %s", updatedScaler.Status.Status, cronscalerv1.FAILED)
+	}
+	if updatedScaler.Status.FailedDeploymentSummary != "apps/missing" {
+		t.Fatalf("failed summary = %s, want apps/missing", updatedScaler.Status.FailedDeploymentSummary)
+	}
+	missingAnnotation := updatedScaler.Annotations["missing"]
+	if !strings.Contains(missingAnnotation, `"reason":"DeploymentNotFound"`) {
+		t.Fatalf("missing annotation = %s, want DeploymentNotFound reason", missingAnnotation)
+	}
+	if !strings.Contains(missingAnnotation, `"message":`) {
+		t.Fatalf("missing annotation = %s, want failure message", missingAnnotation)
+	}
+}
+
+func TestReconcileRetriesMissingDeploymentInfoWhenDeploymentAppearsLater(t *testing.T) {
+	scheme := newTestScheme(t)
+	initialReplicas := int32(1)
+	missingInitialReplicas := int32(2)
+	targetReplicas := int32(5)
+	scaler := cronscalerv1.CronScaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "sample",
+			Namespace:  "default",
+			Finalizers: []string{FinalizerName},
+		},
+		Spec: cronscalerv1.CronScalerSpec{
+			StartTime: "00:00",
+			EndTime:   "00:00",
+			Replicas:  targetReplicas,
+			Deployments: []cronscalerv1.DeploymentScaleTarget{
+				{Name: "web", NameSpace: "apps"},
+				{Name: "missing", NameSpace: "apps"},
+			},
+		},
+		Status: cronscalerv1.CronScalerStatus{Status: cronscalerv1.RUNNING},
+	}
+	webDeployment := appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "apps"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &initialReplicas},
+	}
+	reconciler := &CronScalerReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&cronscalerv1.CronScaler{}).WithObjects(&scaler, &webDeployment).Build(),
+		Scheme: scheme,
+	}
+
+	for i := 0; i < 2; i++ {
+		_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "sample", Namespace: "default"}})
+		if err != nil {
+			t.Fatalf("Reconcile attempt %d returned error: %v", i+1, err)
+		}
+	}
+
+	missingDeployment := appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "missing", Namespace: "apps"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &missingInitialReplicas},
+	}
+	if err := reconciler.Create(context.Background(), &missingDeployment); err != nil {
+		t.Fatalf("create missing Deployment returned error: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "sample", Namespace: "default"}})
+		if err != nil {
+			t.Fatalf("Reconcile retry attempt %d returned error: %v", i+1, err)
+		}
+	}
+
+	var updatedMissing appsv1.Deployment
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: "missing", Namespace: "apps"}, &updatedMissing); err != nil {
+		t.Fatalf("get updated missing Deployment returned error: %v", err)
+	}
+	if updatedMissing.Spec.Replicas == nil || *updatedMissing.Spec.Replicas != targetReplicas {
+		t.Fatalf("missing replicas = %v, want %d", updatedMissing.Spec.Replicas, targetReplicas)
+	}
+
+	var updatedScaler cronscalerv1.CronScaler
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: "sample", Namespace: "default"}, &updatedScaler); err != nil {
+		t.Fatalf("get updated CronScaler returned error: %v", err)
+	}
+	missingAnnotation := updatedScaler.Annotations["missing"]
+	if !strings.Contains(missingAnnotation, `"replicas":2`) {
+		t.Fatalf("missing annotation = %s, want original replicas", missingAnnotation)
+	}
+	if strings.Contains(missingAnnotation, `"reason":`) {
+		t.Fatalf("missing annotation = %s, want failure reason cleared", missingAnnotation)
+	}
+	if updatedScaler.Status.Status != cronscalerv1.SUCCESS {
+		t.Fatalf("status = %s, want %s", updatedScaler.Status.Status, cronscalerv1.SUCCESS)
 	}
 }
 
