@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 func TestSaveDeploymentInfoIntoAnnotationInitializesAnnotationsAndStoresNamespace(t *testing.T) {
@@ -216,6 +217,64 @@ func TestReconcileRestoresDeploymentAfterScaleWindow(t *testing.T) {
 	}
 	if updatedDeployment.Spec.Replicas == nil || *updatedDeployment.Spec.Replicas != originalReplicas {
 		t.Fatalf("replicas = %v, want %d", updatedDeployment.Spec.Replicas, originalReplicas)
+	}
+}
+
+func TestReconcileRestoresDeploymentAndRemovesFinalizerOnDelete(t *testing.T) {
+	scheme := newTestScheme(t)
+	deleteTime := metav1.Now()
+	originalReplicas := int32(2)
+	scaledReplicas := int32(5)
+	annotation := `{"replicas":2,"namespace":"apps","name":"web"}`
+	scaler := cronscalerv1.CronScaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sample",
+			Namespace:         "default",
+			DeletionTimestamp: &deleteTime,
+			Finalizers:        []string{FinalizerName},
+			Annotations:       map[string]string{"web": annotation},
+		},
+		Spec: cronscalerv1.CronScalerSpec{
+			StartTime: "00:00",
+			EndTime:   "00:00",
+			Replicas:  scaledReplicas,
+			Deployments: []cronscalerv1.DeploymentScaleTarget{
+				{Name: "web", NameSpace: "apps"},
+			},
+		},
+		Status: cronscalerv1.CronScalerStatus{Status: cronscalerv1.SUCCESS},
+	}
+	deployment := appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "apps"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &scaledReplicas},
+	}
+	reconciler := &CronScalerReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&cronscalerv1.CronScaler{}).WithObjects(&scaler, &deployment).Build(),
+		Scheme: scheme,
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "sample", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+
+	var updatedDeployment appsv1.Deployment
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: "web", Namespace: "apps"}, &updatedDeployment); err != nil {
+		t.Fatalf("get updated Deployment returned error: %v", err)
+	}
+	if updatedDeployment.Spec.Replicas == nil || *updatedDeployment.Spec.Replicas != originalReplicas {
+		t.Fatalf("replicas = %v, want %d", updatedDeployment.Spec.Replicas, originalReplicas)
+	}
+
+	var updatedScaler cronscalerv1.CronScaler
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: "sample", Namespace: "default"}, &updatedScaler); err != nil {
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("get updated CronScaler returned error: %v", err)
+		}
+		return
+	}
+	if controllerutil.ContainsFinalizer(&updatedScaler, FinalizerName) {
+		t.Fatalf("finalizer still exists")
 	}
 }
 

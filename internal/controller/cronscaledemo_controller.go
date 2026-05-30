@@ -208,6 +208,14 @@ func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				reconcileLogger.Error(err, "Unable to restore Deployment replicas")
 				return ctrl.Result{}, err
 			}
+			// restoreDeploymentReplicas 会更新 CronScaler status，移除 finalizer 前必须重新获取最新 resourceVersion。
+			if err := r.Get(ctx, req.NamespacedName, scaler); err != nil {
+				if apierrors.IsNotFound(err) {
+					return ctrl.Result{}, nil
+				}
+				reconcileLogger.Error(err, "Unable to fetch CronScaler after restoring Deployment replicas")
+				return ctrl.Result{}, err
+			}
 		}
 		reconcileLogger.Info("Removing finalizer", "finalizer", FinalizerName)
 		controllerutil.RemoveFinalizer(scaler, FinalizerName)
@@ -215,6 +223,10 @@ func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			// 并发删除时对象已不存在，finalizer 清理流程可以结束。
 			if apierrors.IsNotFound(err) {
 				return ctrl.Result{}, nil
+			}
+			if apierrors.IsConflict(err) {
+				// 有其它更新抢先写入时重新入队，下轮会基于最新 resourceVersion 继续删除流程。
+				return ctrl.Result{RequeueAfter: time.Millisecond}, nil
 			}
 			reconcileLogger.Error(err, "Unable to update CronScaler")
 			return ctrl.Result{}, err
