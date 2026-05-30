@@ -49,9 +49,6 @@ spec:
           spec:
             description: spec defines the desired state of CronScaler
             properties:
-              defaultReplicas:
-                format: int32
-                type: integer
               deployments:
                 items:
                   properties:

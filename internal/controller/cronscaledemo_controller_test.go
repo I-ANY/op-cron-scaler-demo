@@ -51,6 +51,61 @@ func TestSaveDeploymentInfoIntoAnnotationInitializesAnnotationsAndStoresNamespac
 	}
 }
 
+func TestReconcileSavesDeploymentInfoWhenUnrelatedAnnotationExists(t *testing.T) {
+	scheme := newTestScheme(t)
+	originalReplicas := int32(2)
+	targetReplicas := int32(5)
+	scaler := cronscalerv1.CronScaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "sample",
+			Namespace:  "default",
+			Finalizers: []string{FinalizerName},
+			Annotations: map[string]string{
+				"kubectl.kubernetes.io/last-applied-configuration": "{}",
+			},
+		},
+		Spec: cronscalerv1.CronScalerSpec{
+			StartTime: "00:00",
+			EndTime:   "00:00",
+			Replicas:  targetReplicas,
+			Deployments: []cronscalerv1.DeploymentScaleTarget{
+				{Name: "web", NameSpace: "apps"},
+			},
+		},
+		Status: cronscalerv1.CronScalerStatus{Status: cronscalerv1.RUNNING},
+	}
+	deployment := appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "apps"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &originalReplicas},
+	}
+	reconciler := &CronScalerReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&cronscalerv1.CronScaler{}).WithObjects(&scaler, &deployment).Build(),
+		Scheme: scheme,
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "sample", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+
+	var updatedScaler cronscalerv1.CronScaler
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: "sample", Namespace: "default"}, &updatedScaler); err != nil {
+		t.Fatalf("get updated CronScaler returned error: %v", err)
+	}
+	annotation := updatedScaler.Annotations["web"]
+	if annotation != `{"replicas":2,"namespace":"apps","name":"web"}` {
+		t.Fatalf("annotation = %s, want original deployment info", annotation)
+	}
+
+	var updatedDeployment appsv1.Deployment
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: "web", Namespace: "apps"}, &updatedDeployment); err != nil {
+		t.Fatalf("get updated Deployment returned error: %v", err)
+	}
+	if updatedDeployment.Spec.Replicas == nil || *updatedDeployment.Spec.Replicas != originalReplicas {
+		t.Fatalf("replicas = %v, want original replicas %d before next reconcile", updatedDeployment.Spec.Replicas, originalReplicas)
+	}
+}
+
 func TestIsWithinScaleWindowIncludesStartAndSupportsCrossMidnight(t *testing.T) {
 	parseTime := func(value string) time.Time {
 		parsed, err := time.Parse(cronscalerv1.MinuteTimeLayout, value)

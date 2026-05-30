@@ -109,7 +109,7 @@ func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			// status 更新后重新入队，避免继续使用旧 resourceVersion 更新 annotations
 			return ctrl.Result{RequeueAfter: time.Millisecond}, nil
 		}
-		if scaler.Annotations == nil || len(scaler.Annotations) == 0 {
+		if scaler.Status.Status == cronscalerv1.RUNNING && !hasSavedDeploymentInfo(*scaler) {
 			// 保存deployment 的信息
 			if err := saveDeploymentInfoIntoAnnotation(ctx, *scaler, r); err != nil {
 				// 并发删除时对象已不存在，不需要再保存初始化信息。
@@ -201,6 +201,15 @@ func isWithinScaleWindow(currentTime, startTime, endTime time.Time) bool {
 		return !currentTime.Before(startTime) && currentTime.Before(endTime)
 	}
 	return !currentTime.Before(startTime) || currentTime.Before(endTime)
+}
+
+func hasSavedDeploymentInfo(scaler cronscalerv1.CronScaler) bool {
+	for _, deployment := range scaler.Spec.Deployments {
+		if _, ok := scaler.Annotations[deployment.Name]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // 保存目标 deployment的信息

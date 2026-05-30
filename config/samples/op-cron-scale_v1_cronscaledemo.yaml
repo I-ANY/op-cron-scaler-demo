@@ -10,7 +10,6 @@ spec:
   startTime: "17:20"
   endTime: "18:00"
   replicas: 5
-  defaultReplicas: 1
   deployments:
   - name: nginx-1
     namespace: app
