@@ -67,6 +67,14 @@ type DeploymentScaleTarget struct {
 	NameSpace string `json:"namespace"`
 }
 
+type DeploymentScaleFailedStatus struct {
+	Name               string      `json:"name"`
+	NameSpace          string      `json:"namespace"`
+	Reason             string      `json:"reason"`
+	Message            string      `json:"message"`
+	LastTransitionTime metav1.Time `json:"lastTransitionTime"`
+}
+
 // CronScalerStatus defines the observed state of CronScaler.
 type CronScalerStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
@@ -89,12 +97,17 @@ type CronScalerStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 	Status     string             `json:"status"`
+	// +optional
+	FailedDeployments []DeploymentScaleFailedStatus `json:"failedDeployments,omitempty"`
+	// +optional
+	FailedDeploymentSummary string `json:"failedDeploymentSummary,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=cronscalers,singular=cronscaler
 // +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.status"
+// +kubebuilder:printcolumn:name="FailedDeployments",type="string",JSONPath=".status.failedDeploymentSummary"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // CronScaler is the Schema for the cronscalers API

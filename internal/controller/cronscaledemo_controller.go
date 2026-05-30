@@ -18,10 +18,12 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	cronscalerv1 "github.com/example/op-cron-scale/api/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
@@ -33,10 +35,7 @@ import (
 
 const FinalizerName = "finalizer.op-cron-scaler.example.com"
 
-var (
-	logger                 = log.Log.WithValues("Cron Scaler")
-	originalDeploymentInfo = make(map[string]cronscalerv1.DeploymentInfo)
-)
+var logger = log.Log.WithValues("Cron Scaler")
 
 // CronScalerReconciler reconciles a CronScaler object
 type CronScalerReconciler struct {
@@ -60,15 +59,15 @@ type CronScalerReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
 func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	//logger := log.FromContext(ctx).WithValues("namespace", req.Namespace, "name", req.Name)
-	logger = logger.WithValues("namespace", req.Namespace, "name", req.Name)
-	logger.Info("Reconciling CronScaler")
+	reconcileLogger := logger.WithValues("namespace", req.Namespace, "name", req.Name)
+	reconcileLogger.Info("Reconciling CronScaler")
 
 	currentTimeStr := time.Now().Format(cronscalerv1.MinuteTimeLayout)
 	currentTime, _ := time.Parse(cronscalerv1.MinuteTimeLayout, currentTimeStr)
 	// 获取scaler
 	scaler := &cronscalerv1.CronScaler{}
 	if err := r.Get(ctx, req.NamespacedName, scaler); err != nil {
-		logger.Error(err, "unable to fetch Cron Scaler")
+		reconcileLogger.Error(err, "unable to fetch Cron Scaler")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	// 首先先保存初始的deploy 的副本数等信息，保存到 cron scaler 的 Annotations中
@@ -83,23 +82,23 @@ func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		*/
 		if !controllerutil.ContainsFinalizer(scaler, FinalizerName) {
 			controllerutil.AddFinalizer(scaler, FinalizerName)
-			logger.Info("add finalizer", "finalizer", FinalizerName)
+			reconcileLogger.Info("add finalizer", "finalizer", FinalizerName)
 			if err := r.Update(ctx, scaler); err != nil {
-				logger.Error(err, "unable to update CronScaler")
-				return ctrl.Result{}, client.IgnoreNotFound(err)
+				reconcileLogger.Error(err, "unable to update CronScaler")
+				return ctrl.Result{}, err
 			}
 		}
 		// 判断scaler 的状态，刚开始状态，置为 running
 		if scaler.Status.Status == "" {
 			scaler.Status.Status = cronscalerv1.RUNNING
 			if err := r.Status().Update(ctx, scaler); err != nil {
-				logger.Error(err, "unable to update CronScaler status")
-				return ctrl.Result{}, client.IgnoreNotFound(err)
+				reconcileLogger.Error(err, "unable to update CronScaler status")
+				return ctrl.Result{}, err
 			}
 			// 保存deployment 的信息
 			if err := saveDeploymentInfoIntoAnnotation(ctx, *scaler, r); err != nil {
-				logger.Error(err, "unable to save original deployment info into annotation")
-				return ctrl.Result{}, client.IgnoreNotFound(err)
+				reconcileLogger.Error(err, "unable to save original deployment info into annotation")
+				return ctrl.Result{}, err
 			}
 		}
 
@@ -107,55 +106,85 @@ func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// 获取配置的时间段信息
 		startTime, err := time.Parse(cronscalerv1.MinuteTimeLayout, scaler.Spec.StartTime)
 		if err != nil {
-			logger.Error(err, "invalid startTime", "startTime", scaler.Spec.StartTime)
+			reconcileLogger.Error(err, "invalid startTime", "startTime", scaler.Spec.StartTime)
 			return ctrl.Result{}, err
 		}
 		endTime, err := time.Parse(cronscalerv1.MinuteTimeLayout, scaler.Spec.EndTime)
 		if err != nil {
-			logger.Error(err, "invalid endTime", "endTime", scaler.Spec.EndTime)
+			reconcileLogger.Error(err, "invalid endTime", "endTime", scaler.Spec.EndTime)
 			return ctrl.Result{}, err
 		}
-		logger.Info("current time", "currentTime", currentTime.Format(cronscalerv1.MinuteTimeLayout), "startTime", startTime.Format(cronscalerv1.MinuteTimeLayout), "endTime", endTime.Format(cronscalerv1.MinuteTimeLayout))
+		reconcileLogger.Info("current time", "currentTime", currentTime.Format(cronscalerv1.MinuteTimeLayout), "startTime", startTime.Format(cronscalerv1.MinuteTimeLayout), "endTime", endTime.Format(cronscalerv1.MinuteTimeLayout))
 		// 判断当前时间是否在时间段内
-		targetReplicas := scaler.Spec.DefaultReplicas
-		if currentTime.After(startTime) && currentTime.Before(endTime) {
-			logger.Info("start to scale deployment", "targetReplicas", scaler.Spec.Replicas)
-			targetReplicas = scaler.Spec.Replicas
-			// 更新deployment副本数
+		if isWithinScaleWindow(currentTime, startTime, endTime) {
+			reconcileLogger.Info("start to scale deployment", "targetReplicas", scaler.Spec.Replicas)
+			// 更新deployment副本数，并记录本轮扩缩容失败的 deployment
+			failedDeployments := make([]cronscalerv1.DeploymentScaleFailedStatus, 0)
 			for _, deployment := range scaler.Spec.Deployments {
-				if err := r.scaleDeployment(ctx, *scaler, deployment, targetReplicas); err != nil {
-					logger.Error(err, "unable to scale Deployment", "deploymentName", deployment.Name, "namespace", deployment.NameSpace)
-					return ctrl.Result{}, err
+				if err := r.scaleDeployment(ctx, deployment, scaler.Spec.Replicas); err != nil {
+					reconcileLogger.Error(err, "unable to scale Deployment", "deploymentName", deployment.Name, "namespace", deployment.NameSpace)
+					failedDeployments = append(failedDeployments, cronscalerv1.DeploymentScaleFailedStatus{
+						Name:               deployment.Name,
+						NameSpace:          deployment.NameSpace,
+						Reason:             "UpdateDeploymentFailed",
+						Message:            err.Error(),
+						LastTransitionTime: metav1.Now(),
+					})
 				}
+			}
+			if err := updateScaleStatus(ctx, r, *scaler, failedDeployments); err != nil {
+				reconcileLogger.Error(err, "unable to update CronScaler scale status")
+				return ctrl.Result{}, err
+			}
+		} else if scaler.Status.Status == cronscalerv1.SUCCESS {
+			// 不在时间范围内时，如果已经扩缩容过，需要恢复 deployment 原始副本数
+			if err := restoreDeploymentReplicas(ctx, r, *scaler); err != nil {
+				reconcileLogger.Error(err, "unable to restore deployment replicas")
+				return ctrl.Result{}, err
 			}
 		}
 	} else {
 		// cron scaler 被删除了
 		// 如果已经更改了 deployment 的副本数，那么需要把副本数还原
-		logger.Info("start to CronScaler delete")
+		reconcileLogger.Info("start to CronScaler delete")
 		if scaler.Status.Status == cronscalerv1.SUCCESS {
 			if err := restoreDeploymentReplicas(ctx, r, *scaler); err != nil {
-				logger.Error(err, "unable to restore deployment replicas")
+				reconcileLogger.Error(err, "unable to restore deployment replicas")
 				return ctrl.Result{}, err
 			}
 		}
-		logger.Info("remove finalizer")
+		reconcileLogger.Info("remove finalizer")
 		controllerutil.RemoveFinalizer(scaler, FinalizerName)
 		if err := r.Update(ctx, scaler); err != nil {
-			logger.Error(err, "unable to update CronScaler")
+			reconcileLogger.Error(err, "unable to update CronScaler")
 			return ctrl.Result{}, err
 		}
-		logger.Info("finalizer deleted")
-		logger.Info("CronScaler deleted")
+		reconcileLogger.Info("finalizer deleted")
+		reconcileLogger.Info("CronScaler deleted")
 	}
 	// 一分钟轮询进行更新
 	//不传 RequeueAfter：不会每分钟检查，那即使时间到了，如果资源没发生变更，也不会自动触发
 	return ctrl.Result{RequeueAfter: time.Second * 5}, nil
 }
 
+// 判断当前时间是否在扩缩容时间范围内，支持跨天时间段
+func isWithinScaleWindow(currentTime, startTime, endTime time.Time) bool {
+	if startTime.Equal(endTime) {
+		return true
+	}
+	if startTime.Before(endTime) {
+		return !currentTime.Before(startTime) && currentTime.Before(endTime)
+	}
+	return !currentTime.Before(startTime) || currentTime.Before(endTime)
+}
+
 // 保存目标 deployment的信息
 func saveDeploymentInfoIntoAnnotation(ctx context.Context, scaler cronscalerv1.CronScaler, r *CronScalerReconciler) (err error) {
 	logger.Info("Start to save original deployment info into cron scaler annotation")
+	// 如果用户创建 CronScaler 时没有配置 annotations，这里需要先初始化再写入
+	if scaler.Annotations == nil {
+		scaler.Annotations = make(map[string]string)
+	}
 	deployment := appsv1.Deployment{}
 	for _, depItem := range scaler.Spec.Deployments {
 		if err := r.Get(ctx, types.NamespacedName{
@@ -166,7 +195,8 @@ func saveDeploymentInfoIntoAnnotation(ctx context.Context, scaler cronscalerv1.C
 			continue
 		}
 		originalDeploy := cronscalerv1.DeploymentInfo{
-			NameSpace: deployment.Name,
+			Name:      deployment.Name,
+			NameSpace: deployment.Namespace,
 			Replicas:  *deployment.Spec.Replicas,
 		}
 		jsonData, err := json.Marshal(originalDeploy)
@@ -179,7 +209,7 @@ func saveDeploymentInfoIntoAnnotation(ctx context.Context, scaler cronscalerv1.C
 }
 
 // 更新deployment副本数方法
-func (r *CronScalerReconciler) scaleDeployment(ctx context.Context, scaler cronscalerv1.CronScaler, target cronscalerv1.DeploymentScaleTarget, replicas int32) error {
+func (r *CronScalerReconciler) scaleDeployment(ctx context.Context, target cronscalerv1.DeploymentScaleTarget, replicas int32) error {
 	deploy := &appsv1.Deployment{}
 
 	// 获取deployment对象
@@ -195,18 +225,33 @@ func (r *CronScalerReconciler) scaleDeployment(ctx context.Context, scaler crons
 	logger.Info("updating Deployment replicas", "replicas", replicas)
 	deploy.Spec.Replicas = &replicas
 	if err := r.Update(ctx, deploy); err != nil {
-		// 如果更新失败就把scaler 状态更新为 failed
-		scaler.Status.Status = cronscalerv1.FAILED
-		if err := r.Status().Update(ctx, &scaler); err != nil {
-			return err
-		}
-	}
-	//更新成功就把scaler 状态更新为 failed
-	scaler.Status.Status = cronscalerv1.SUCCESS
-	if err := r.Status().Update(ctx, &scaler); err != nil {
 		return err
 	}
 	return nil
+}
+
+// 根据本轮扩缩容失败结果更新 CronScaler 状态
+func updateScaleStatus(ctx context.Context, r *CronScalerReconciler, scaler cronscalerv1.CronScaler, failedDeployments []cronscalerv1.DeploymentScaleFailedStatus) error {
+	if len(failedDeployments) == 0 {
+		scaler.Status.Status = cronscalerv1.SUCCESS
+		scaler.Status.FailedDeployments = nil
+		scaler.Status.FailedDeploymentSummary = ""
+		return r.Status().Update(ctx, &scaler)
+	}
+
+	scaler.Status.Status = cronscalerv1.FAILED
+	scaler.Status.FailedDeployments = failedDeployments
+	scaler.Status.FailedDeploymentSummary = buildFailedDeploymentSummary(failedDeployments)
+	return r.Status().Update(ctx, &scaler)
+}
+
+// 构建用于 kubectl get 展示的失败 deployment 摘要
+func buildFailedDeploymentSummary(failedDeployments []cronscalerv1.DeploymentScaleFailedStatus) string {
+	summaries := make([]string, 0, len(failedDeployments))
+	for _, deployment := range failedDeployments {
+		summaries = append(summaries, deployment.NameSpace+"/"+deployment.Name)
+	}
+	return strings.Join(summaries, ",")
 }
 
 // 重置 deployment的信息

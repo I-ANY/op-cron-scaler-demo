@@ -18,6 +18,9 @@ spec:
     - jsonPath: .status.status
       name: Status
       type: string
+    - jsonPath: .status.failedDeploymentSummary
+      name: FailedDeployments
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -73,7 +76,6 @@ spec:
                 pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
                 type: string
             required:
-            - defaultReplicas
             - deployments
             - endTime
             - replicas
@@ -151,6 +153,30 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              failedDeploymentSummary:
+                type: string
+              failedDeployments:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                    reason:
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - name
+                  - namespace
+                  - reason
+                  type: object
+                type: array
               status:
                 type: string
             required:
@@ -161,4 +187,5 @@ spec:
         type: object
     served: true
     storage: true
-    subresources: {}
+    subresources:
+      status: {}
