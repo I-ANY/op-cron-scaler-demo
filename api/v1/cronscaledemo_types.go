@@ -56,10 +56,8 @@ type CronScalerSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=10
 	// +kubebuilder:validation:Required
-	Replicas int32 `json:"replicas"`
-	// +optional
-	DefaultReplicas int32                   `json:"defaultReplicas,omitempty"`
-	Deployments     []DeploymentScaleTarget `json:"deployments"`
+	Replicas    int32                   `json:"replicas"`
+	Deployments []DeploymentScaleTarget `json:"deployments"`
 }
 
 type DeploymentScaleTarget struct {
