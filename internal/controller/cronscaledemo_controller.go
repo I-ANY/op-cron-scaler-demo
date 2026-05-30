@@ -23,6 +23,7 @@ import (
 
 	cronscalerv1 "github.com/example/op-cron-scale/api/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -67,8 +68,12 @@ func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// 获取scaler
 	scaler := &cronscalerv1.CronScaler{}
 	if err := r.Get(ctx, req.NamespacedName, scaler); err != nil {
+		// 资源可能已经被删除，删除事件无需继续处理。
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
 		reconcileLogger.Error(err, "unable to fetch Cron Scaler")
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		return ctrl.Result{}, err
 	}
 	// 首先先保存初始的deploy 的副本数等信息，保存到 cron scaler 的 Annotations中
 	// 先判断scaler 的状态，如果是刚开始首次启动，还没有进行任何操作
@@ -84,22 +89,41 @@ func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			controllerutil.AddFinalizer(scaler, FinalizerName)
 			reconcileLogger.Info("add finalizer", "finalizer", FinalizerName)
 			if err := r.Update(ctx, scaler); err != nil {
+				// 并发删除时对象已不存在，不需要重试更新 finalizer。
+				if apierrors.IsNotFound(err) {
+					return ctrl.Result{}, nil
+				}
 				reconcileLogger.Error(err, "unable to update CronScaler")
 				return ctrl.Result{}, err
 			}
+			// metadata 更新后重新入队，避免继续使用旧 resourceVersion 更新 status
+			return ctrl.Result{Requeue: true}, nil
 		}
-		// 判断scaler 的状态，刚开始状态，置为 running
 		if scaler.Status.Status == "" {
 			scaler.Status.Status = cronscalerv1.RUNNING
 			if err := r.Status().Update(ctx, scaler); err != nil {
+				// 并发删除时对象已不存在，不需要再写入状态。
+				if apierrors.IsNotFound(err) {
+					return ctrl.Result{}, nil
+				}
 				reconcileLogger.Error(err, "unable to update CronScaler status")
 				return ctrl.Result{}, err
 			}
+			// status 更新后重新入队，避免继续使用旧 resourceVersion 更新 annotations
+			return ctrl.Result{RequeueAfter: time.Millisecond}, nil
+		}
+		if scaler.Annotations == nil || len(scaler.Annotations) == 0 {
 			// 保存deployment 的信息
 			if err := saveDeploymentInfoIntoAnnotation(ctx, *scaler, r); err != nil {
+				// 并发删除时对象已不存在，不需要再保存初始化信息。
+				if apierrors.IsNotFound(err) {
+					return ctrl.Result{}, nil
+				}
 				reconcileLogger.Error(err, "unable to save original deployment info into annotation")
 				return ctrl.Result{}, err
 			}
+			// annotations 更新后重新入队，避免继续使用旧 resourceVersion 更新 status
+			return ctrl.Result{RequeueAfter: time.Millisecond}, nil
 		}
 
 		// 开始进行 scale
@@ -156,6 +180,10 @@ func (r *CronScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		reconcileLogger.Info("remove finalizer")
 		controllerutil.RemoveFinalizer(scaler, FinalizerName)
 		if err := r.Update(ctx, scaler); err != nil {
+			// 并发删除时对象已不存在，finalizer 清理流程可以结束。
+			if apierrors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
 			reconcileLogger.Error(err, "unable to update CronScaler")
 			return ctrl.Result{}, err
 		}
@@ -236,13 +264,15 @@ func updateScaleStatus(ctx context.Context, r *CronScalerReconciler, scaler cron
 		scaler.Status.Status = cronscalerv1.SUCCESS
 		scaler.Status.FailedDeployments = nil
 		scaler.Status.FailedDeploymentSummary = ""
-		return r.Status().Update(ctx, &scaler)
+		// 扩缩容完成后对象可能已被删除，NotFound 不应触发 Reconciler error。
+		return client.IgnoreNotFound(r.Status().Update(ctx, &scaler))
 	}
 
 	scaler.Status.Status = cronscalerv1.FAILED
 	scaler.Status.FailedDeployments = failedDeployments
 	scaler.Status.FailedDeploymentSummary = buildFailedDeploymentSummary(failedDeployments)
-	return r.Status().Update(ctx, &scaler)
+	// 记录失败状态时对象可能已被删除，NotFound 不应触发 Reconciler error。
+	return client.IgnoreNotFound(r.Status().Update(ctx, &scaler))
 }
 
 // 构建用于 kubectl get 展示的失败 deployment 摘要
@@ -287,7 +317,8 @@ func restoreDeploymentReplicas(ctx context.Context, r *CronScalerReconciler, sca
 	}
 	// 修改状态
 	scaler.Status.Status = cronscalerv1.RESTORED
-	return r.Update(ctx, &scaler)
+	// 恢复副本数后只更新 status；对象并发删除时忽略 NotFound。
+	return client.IgnoreNotFound(r.Status().Update(ctx, &scaler))
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -8,8 +8,10 @@ import (
 
 	cronscalerv1 "github.com/example/op-cron-scale/api/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -123,6 +125,7 @@ func TestReconcileRestoresDeploymentAfterScaleWindow(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "sample",
 			Namespace:   "default",
+			Finalizers:  []string{FinalizerName},
 			Annotations: map[string]string{"web": annotation},
 		},
 		Spec: cronscalerv1.CronScalerSpec{
@@ -164,7 +167,15 @@ func TestReconcileRecordsFailedDeploymentsAndContinuesScaling(t *testing.T) {
 	targetReplicas := int32(5)
 	updateErr := errors.New("update failed")
 	scaler := cronscalerv1.CronScaler{
-		ObjectMeta: metav1.ObjectMeta{Name: "sample", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "sample",
+			Namespace:  "default",
+			Finalizers: []string{FinalizerName},
+			Annotations: map[string]string{
+				"web": `{"replicas":1,"namespace":"apps","name":"web"}`,
+				"api": `{"replicas":1,"namespace":"apps","name":"api"}`,
+			},
+		},
 		Spec: cronscalerv1.CronScalerSpec{
 			StartTime: "00:00",
 			EndTime:   "00:00",
@@ -242,7 +253,14 @@ func TestReconcileClearsFailedDeploymentsAfterSuccessfulScaling(t *testing.T) {
 	initialReplicas := int32(1)
 	targetReplicas := int32(5)
 	scaler := cronscalerv1.CronScaler{
-		ObjectMeta: metav1.ObjectMeta{Name: "sample", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "sample",
+			Namespace:  "default",
+			Finalizers: []string{FinalizerName},
+			Annotations: map[string]string{
+				"web": `{"replicas":1,"namespace":"apps","name":"web"}`,
+			},
+		},
 		Spec: cronscalerv1.CronScalerSpec{
 			StartTime: "00:00",
 			EndTime:   "00:00",
@@ -291,6 +309,104 @@ func TestReconcileClearsFailedDeploymentsAfterSuccessfulScaling(t *testing.T) {
 	}
 	if len(updatedScaler.Status.FailedDeployments) != 0 {
 		t.Fatalf("failed deployments count = %d, want 0", len(updatedScaler.Status.FailedDeployments))
+	}
+}
+
+func TestReconcileScalesAfterAddingFinalizerWithoutStaleStatusNotFound(t *testing.T) {
+	scheme := newTestScheme(t)
+	initialReplicas := int32(1)
+	targetReplicas := int32(5)
+	scaler := cronscalerv1.CronScaler{
+		ObjectMeta: metav1.ObjectMeta{Name: "sample", Namespace: "default"},
+		Spec: cronscalerv1.CronScalerSpec{
+			StartTime: "00:00",
+			EndTime:   "00:00",
+			Replicas:  targetReplicas,
+			Deployments: []cronscalerv1.DeploymentScaleTarget{
+				{Name: "web", NameSpace: "apps"},
+			},
+		},
+	}
+	deployment := appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "apps"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &initialReplicas},
+	}
+	reconciler := &CronScalerReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&cronscalerv1.CronScaler{}).WithObjects(&scaler, &deployment).Build(),
+		Scheme: scheme,
+	}
+
+	for i := 0; i < 4; i++ {
+		_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "sample", Namespace: "default"}})
+		if err != nil {
+			t.Fatalf("Reconcile attempt %d returned error: %v", i+1, err)
+		}
+	}
+
+	var updatedScaler cronscalerv1.CronScaler
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: "sample", Namespace: "default"}, &updatedScaler); err != nil {
+		t.Fatalf("get updated CronScaler returned error: %v", err)
+	}
+	if updatedScaler.Status.Status != cronscalerv1.SUCCESS {
+		t.Fatalf("status = %s, want %s", updatedScaler.Status.Status, cronscalerv1.SUCCESS)
+	}
+}
+
+func TestReconcileIgnoresCronScalerNotFoundDuringScaleStatusUpdate(t *testing.T) {
+	scheme := newTestScheme(t)
+	initialReplicas := int32(1)
+	targetReplicas := int32(5)
+	scaler := cronscalerv1.CronScaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "sample",
+			Namespace:  "default",
+			Finalizers: []string{FinalizerName},
+			Annotations: map[string]string{
+				"web": `{"replicas":1,"namespace":"apps","name":"web"}`,
+			},
+		},
+		Spec: cronscalerv1.CronScalerSpec{
+			StartTime: "00:00",
+			EndTime:   "00:00",
+			Replicas:  targetReplicas,
+			Deployments: []cronscalerv1.DeploymentScaleTarget{
+				{Name: "web", NameSpace: "apps"},
+			},
+		},
+		Status: cronscalerv1.CronScalerStatus{Status: cronscalerv1.RUNNING},
+	}
+	deployment := appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "apps"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &initialReplicas},
+	}
+	reconciler := &CronScalerReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&cronscalerv1.CronScaler{}).WithObjects(&scaler, &deployment).WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if subResourceName == "status" {
+					if _, ok := obj.(*cronscalerv1.CronScaler); ok {
+						return apierrors.NewNotFound(schema.GroupResource{
+							Group:    cronscalerv1.GroupVersion.Group,
+							Resource: "cronscalers",
+						}, obj.GetName())
+					}
+				}
+				return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+			},
+		}).Build(),
+		Scheme: scheme,
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "sample", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+
+	var updatedDeployment appsv1.Deployment
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: "web", Namespace: "apps"}, &updatedDeployment); err != nil {
+		t.Fatalf("get updated Deployment returned error: %v", err)
+	}
+	if updatedDeployment.Spec.Replicas == nil || *updatedDeployment.Spec.Replicas != targetReplicas {
+		t.Fatalf("replicas = %v, want %d", updatedDeployment.Spec.Replicas, targetReplicas)
 	}
 }
 
